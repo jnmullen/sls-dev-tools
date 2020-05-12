@@ -6,6 +6,7 @@ import {
 import { getStackResources } from "../services/stackResources";
 import { padString } from "../utils/padString";
 import { lambdaStatisticsModal, lambdaInvokeModal } from "../modals";
+import { getLambdaFunctions } from "../services";
 
 const contrib = require("blessed-contrib");
 const open = require("open");
@@ -29,6 +30,7 @@ class ResourceTable {
   ) {
     this.application = application;
     this.lambdaFunctions = {};
+    this.fullFunctionNames = {};
     this.latestLambdaFunctionsUpdateTimestamp = -1;
     this.program = program;
     this.cloudformation = cloudformation;
@@ -52,8 +54,16 @@ class ResourceTable {
     this.setKeypresses();
   }
 
+  updateAPIs(profile, cloudformation, lambda, cloudwatch, cloudwatchLogs) {
+    this.profile = profile;
+    this.cloudformation = cloudformation;
+    this.lambda = lambda;
+    this.cloudwatch = cloudwatch;
+    this.cloudwatchLogs = cloudwatchLogs;
+  }
+
   getFullFunctionName(abbreviatedFunctionName) {
-    return `${this.program.stackName}-${abbreviatedFunctionName}`;
+    return this.fullFunctionNames[abbreviatedFunctionName];
   }
 
   isOnFocus() {
@@ -74,7 +84,8 @@ class ResourceTable {
           this.getCurrentlyOnHoverFullLambdaName(),
           this.cloudwatchLogs,
           this.cloudwatch,
-          this.lambda
+          this.lambda,
+          this.lambdaFunctions[this.getCurrentlyOnHoverFullLambdaName()]
         );
       }
       return 0;
@@ -144,10 +155,12 @@ class ResourceTable {
       case RESOURCE_TABLE_TYPE.LAMBDA:
         this.type = RESOURCE_TABLE_TYPE.ALL_RESOURCES;
         this.table.setLabel("<-           All Resources          ->");
+        this.table.options.columnWidth = [50, 30];
         break;
       case RESOURCE_TABLE_TYPE.ALL_RESOURCES:
         this.type = RESOURCE_TABLE_TYPE.LAMBDA;
         this.table.setLabel("<-         Lambda Functions         ->");
+        this.table.options.columnWidth = [30, 30, 10, 10, 20];
         break;
       default:
         return 0;
@@ -161,7 +174,7 @@ class ResourceTable {
       fg: "green",
       label: "<-         Lambda Functions         ->",
       columnSpacing: 1,
-      columnWidth: [30, 30, 10, 10, 20],
+      columnWidth: [30, 30, 10, 10, 20, 10],
       style: {
         border: {
           fg: "yellow",
@@ -181,22 +194,7 @@ class ResourceTable {
   }
 
   async refreshLambdaFunctions() {
-    const allFunctions = [];
-    let marker;
-    let response = { NextMarker: true };
-    while (response.NextMarker) {
-      // eslint-disable-next-line no-await-in-loop
-      response = await this.lambda
-        .listFunctions({
-          Marker: marker,
-          MaxItems: 50,
-        })
-        .promise()
-        .catch((error) => console.error(error));
-      const functions = response.Functions;
-      allFunctions.push(...functions);
-      marker = response.NextMarker;
-    }
+    const allFunctions = await getLambdaFunctions(this.lambda);
     this.lambdaFunctions = allFunctions.reduce((map, func) => {
       // eslint-disable-next-line no-param-reassign
       map[func.FunctionName] = func;
@@ -258,24 +256,32 @@ class ResourceTable {
     this.table.data = lambdaFunctionResources.map((lam) => {
       const funcName = lam.PhysicalResourceId;
       const func = this.lambdaFunctions[funcName];
+      const shortenedFuncName = lam.PhysicalResourceId.replace(
+        `${this.program.stackName}-`,
+        ""
+      );
+      this.fullFunctionNames[shortenedFuncName] = funcName;
       let timeout = "?";
       let memory = "?";
       let funcRuntime = "?";
+      let layersPresent = "?";
       if (func) {
         funcRuntime = func.Runtime;
         timeout = func.Timeout.toString();
         memory = func.MemorySize.toString();
+        layersPresent = func.Layers ? "Y" : "N";
       }
       // Max timout is 900 seconds, align values with whitespace
       timeout = padString(timeout, 3);
       // Max memory is 3008 MB, align values with whitespace
       memory = padString(memory, 4);
       return [
-        lam.PhysicalResourceId.replace(`${this.program.stackName}-`, ""),
+        shortenedFuncName,
         moment(lam.LastUpdatedTimestamp).format("MMMM Do YYYY, h:mm:ss a"),
         `${memory} MB`,
         `${timeout} secs`,
         funcRuntime,
+        `${layersPresent}`,
       ];
     });
     this.updateLambdaTableRows();
@@ -287,7 +293,7 @@ class ResourceTable {
     this.table.data = resources.map((resource) => {
       const resourceName = resource.LogicalResourceId;
       const resourceType = resource.ResourceType.replace("AWS::", "");
-      return [resourceName, this.program.region, resourceType];
+      return [resourceName, resourceType];
     });
     this.updateAllResourcesTableRows();
   }
@@ -342,7 +348,7 @@ class ResourceTable {
 
   updateAllResourcesTableRows() {
     this.table.setData({
-      headers: ["logical", "region", "type"],
+      headers: ["logical", "type"],
       data: this.table.data,
     });
   }
@@ -375,7 +381,7 @@ class ResourceTable {
     }
 
     this.table.setData({
-      headers: ["logical", "updated", "memory", "timeout", "runtime"],
+      headers: ["logical", "updated", "memory", "timeout", "runtime", "layers"],
       data: lambdaFunctionsWithDeploymentIndicator,
     });
 
